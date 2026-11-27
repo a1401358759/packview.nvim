@@ -32,6 +32,8 @@ lazy.nvim:
 | `<CR>` | Show the source, commit, and new commits |
 | `q` | Close |
 
+`<leader>ps` opens the list and `<leader>pU` updates every plugin. Both are set when the plugin loads.
+
 `u` and `U` call `vim.pack.update(names, { force = true })`. `d` calls `vim.pack.del`.
 
 ## Load reasons
