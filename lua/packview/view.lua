@@ -223,11 +223,11 @@ local buttons = {
 
 local function center(text, cols)
 	local pad = math.max(math.floor((cols - vim.api.nvim_strwidth(text)) / 2), 0)
-	return (" "):rep(pad) .. text
+	return (" "):rep(pad) .. text .. (" "):rep(cols - pad - vim.api.nvim_strwidth(text))
 end
 
 local function put(row, col, text)
-	return row:sub(1, col) .. text .. row:sub(col + #text + 1)
+	return row:sub(1, col) .. text .. row:sub(col + 1 + #text)
 end
 
 function M.draw()
