@@ -27,7 +27,7 @@ function M.list()
 			needs = row.needs or {},
 			status = "idle",
 			ahead = 0,
-			log = {},
+			commits = {},
 			label = "",
 		}
 	end

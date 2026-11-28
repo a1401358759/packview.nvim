@@ -1,41 +1,56 @@
--- One floating window. The buffer is rebuilt on every change.
+-- One floating window, laid out like a plugin manager: a bar, then groups.
+-- A plugin with new commits shows them underneath instead of in a second window.
 
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("packview")
-vim.api.nvim_set_hl(0, "PackviewUpdate", { link = "DiagnosticWarn", default = true })
-vim.api.nvim_set_hl(0, "PackviewLoaded", { link = "DiagnosticOk", default = true })
-vim.api.nvim_set_hl(0, "PackviewDim", { link = "Comment", default = true })
-vim.api.nvim_set_hl(0, "PackviewMark", { link = "Special", default = true })
+
+local function hl(name, link)
+	vim.api.nvim_set_hl(0, name, { link = link, default = true })
+end
+
+hl("PackviewTitle", "Title")
+hl("PackviewKey", "Special")
+hl("PackviewDim", "Comment")
+hl("PackviewName", "Normal")
+hl("PackviewLoaded", "DiagnosticOk")
+hl("PackviewUpdate", "DiagnosticWarn")
+hl("PackviewReason", "Constant")
+hl("PackviewCommit", "Identifier")
+hl("PackviewSubject", "String")
+hl("PackviewMark", "Special")
 
 local state = {
 	plugins = {},
 	rows = {}, -- buffer line -> plugin index
+	spans = {}, -- { line, col, end_col, group }
 	marked = {},
 	pending = 0,
 	buf = nil,
 	win = nil,
 }
 
+local function width()
+	return vim.api.nvim_win_get_width(state.win)
+end
+
 local function open()
 	if state.win and vim.api.nvim_win_is_valid(state.win) then
 		return
 	end
 	local cfg = require("packview.config").opts
-	local width = math.floor(vim.o.columns * cfg.width)
-	local height = math.floor(vim.o.lines * cfg.height)
+	local w = math.floor(vim.o.columns * cfg.width)
+	local h = math.floor(vim.o.lines * cfg.height)
 	state.buf = vim.api.nvim_create_buf(false, true)
 	state.win = vim.api.nvim_open_win(state.buf, true, {
 		relative = "editor",
-		width = width,
-		height = height,
-		row = math.floor((vim.o.lines - height) / 2),
-		col = math.floor((vim.o.columns - width) / 2),
+		width = w,
+		height = h,
+		row = math.floor((vim.o.lines - h) / 2),
+		col = math.floor((vim.o.columns - w) / 2),
 		border = cfg.border,
 		title = " packview ",
 		title_pos = "center",
-		footer = " space mark   u update   U all   r check   d delete   q close ",
-		footer_pos = "center",
 	})
 	vim.bo[state.buf].filetype = "packview"
 	vim.wo[state.win].cursorline = true
@@ -91,7 +106,72 @@ function M.close()
 	state.win, state.buf = nil, nil
 end
 
-local function counts()
+local function add(line, col, text, group)
+	state.spans[#state.spans + 1] = { line, col, col + #text, group }
+end
+
+local function groups()
+	local updates, loaded, waiting = {}, {}, {}
+	for index, plugin in ipairs(state.plugins) do
+		if plugin.status == "update" then
+			updates[#updates + 1] = index
+		elseif plugin.loaded or plugin.active then
+			loaded[#loaded + 1] = index
+		else
+			waiting[#waiting + 1] = index
+		end
+	end
+	return {
+		{ "Updates", updates },
+		{ "Loaded", loaded },
+		{ "Not loaded", waiting },
+	}
+end
+
+local function reason(plugin)
+	if plugin.why ~= "" then
+		return plugin.why
+	end
+	if plugin.active then
+		return "start"
+	end
+	return ""
+end
+
+function M.draw()
+	if not (state.buf and vim.api.nvim_buf_is_valid(state.buf)) then
+		return
+	end
+	local cursor = state.win and vim.api.nvim_win_is_valid(state.win) and vim.api.nvim_win_get_cursor(state.win)
+	local cols = width()
+	local lines = {}
+	state.rows, state.spans = {}, {}
+
+	local function line(text)
+		lines[#lines + 1] = text
+		return #lines
+	end
+
+	local actions = {
+		{ "Update", "u" },
+		{ "All", "U" },
+		{ "Check", "r" },
+		{ "Clean", "x" },
+		{ "Open", "Enter" },
+	}
+		local pieces = {}
+		for _, action in ipairs(actions) do
+			pieces[#pieces + 1] = action[1] .. " (" .. action[2] .. ")"
+		end
+		local bar = line("  " .. table.concat(pieces, "   "))
+		local col = 2
+		for i, action in ipairs(actions) do
+			local key = " (" .. action[2] .. ")"
+			add(bar, col, action[1], "PackviewTitle")
+			add(bar, col + #action[1], key, "PackviewKey")
+			col = col + #action[1] + #key + (i < #actions and 3 or 0)
+		end
+
 	local loaded, updates = 0, 0
 	for _, plugin in ipairs(state.plugins) do
 		if plugin.loaded or plugin.active then
@@ -101,88 +181,83 @@ local function counts()
 			updates = updates + 1
 		end
 	end
-	return loaded, updates
-end
-
-function M.draw()
-	if not (state.buf and vim.api.nvim_buf_is_valid(state.buf)) then
-		return
-	end
-	local cursor = state.win and vim.api.nvim_win_is_valid(state.win) and vim.api.nvim_win_get_cursor(state.win)
-	local loaded, updates = counts()
-	local head = ("%d plugins   %d loaded   %d updates"):format(#state.plugins, loaded, updates)
+	local summary = ("  Total: %d plugins"):format(#state.plugins)
 	if state.pending > 0 then
-		head = head .. ("   checking %d"):format(state.pending)
+		summary = summary .. ("    checking %d"):format(state.pending)
+	elseif updates > 0 then
+		summary = summary .. ("    %d updates"):format(updates)
 	end
+	local row = line(summary)
+	add(row, 0, summary, "PackviewTitle")
+	line("")
 
-	local lines = { head, "" }
-	local marks = {}
-	state.rows = {}
-	for index, plugin in ipairs(state.plugins) do
-		local dot = (plugin.loaded or plugin.active) and "●" or "○"
-		local box = state.marked[index] and "[x]" or "[ ]"
-		local note = plugin.label ~= "" and plugin.label or plugin.rev:sub(1, 7)
-		lines[#lines + 1] = (" %s %s  %-28s %-22s %s"):format(box, dot, plugin.name, plugin.why, note)
-		state.rows[#lines] = index
-		marks[#lines] = plugin
+	for _, group in ipairs(groups()) do
+		local title, indexes = group[1], group[2]
+		if #indexes > 0 then
+			local heading = ("  %s  (%d)"):format(title, #indexes)
+			local grow = line(heading)
+			add(grow, 2, title, "PackviewTitle")
+			add(grow, 2 + #title, heading:sub(3 + #title), "PackviewDim")
+
+			for _, index in ipairs(indexes) do
+				local plugin = state.plugins[index]
+					local dot = (plugin.loaded or plugin.active) and "●" or "○"
+					local mark = state.marked[index] and "▸ " or "  "
+					local why = reason(plugin)
+					local right = plugin.status == "update" and "updates available" or ""
+					local prefix = mark .. dot .. " "
+					local left = prefix .. plugin.name .. (why ~= "" and ("  " .. why) or "")
+					local gap = cols - vim.api.nvim_strwidth(left) - vim.api.nvim_strwidth(right) - 2
+					local text = left .. (" "):rep(math.max(gap, 2)) .. right
+					local prow = line(text)
+					state.rows[prow] = index
+					local at = #mark
+					add(prow, 0, mark, state.marked[index] and "PackviewMark" or "PackviewDim")
+					add(prow, at, dot, (plugin.loaded or plugin.active) and "PackviewLoaded" or "PackviewDim")
+					at = #prefix
+					add(prow, at, plugin.name, "PackviewName")
+					at = at + #plugin.name + 2
+					if why ~= "" then
+						add(prow, at, why, "PackviewReason")
+					end
+					if right ~= "" then
+						add(prow, #text - #right, right, "PackviewUpdate")
+					end
+
+					for i, commit in ipairs(plugin.commits or {}) do
+						if i > 4 then
+							break
+						end
+						local indent = (" "):rep(vim.api.nvim_strwidth(prefix))
+						local when = "(" .. commit.when .. ")"
+						local commit_line = indent .. commit.sha .. "  " .. commit.subject .. "  " .. when
+						local crow = line(commit_line)
+						state.rows[crow] = index
+						local cat = #indent
+						add(crow, cat, commit.sha, "PackviewCommit")
+						cat = cat + #commit.sha + 2
+						add(crow, cat, commit.subject, "PackviewSubject")
+						cat = cat + #commit.subject + 2
+						add(crow, cat, when, "PackviewDim")
+					end
+			end
+			line("")
+		end
 	end
 
 	vim.bo[state.buf].modifiable = true
 	vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, lines)
 	vim.bo[state.buf].modifiable = false
 	vim.api.nvim_buf_clear_namespace(state.buf, ns, 0, -1)
-	vim.api.nvim_buf_set_extmark(state.buf, ns, 0, 0, { end_row = 1, hl_group = "Title", hl_eol = true })
-	for line, plugin in pairs(marks) do
-		local group = plugin.status == "update" and "PackviewUpdate"
-			or (plugin.loaded or plugin.active) and "PackviewLoaded"
-			or "PackviewDim"
-		vim.api.nvim_buf_set_extmark(state.buf, ns, line - 1, 0, { end_row = line, hl_group = group, hl_eol = true })
-		if state.marked[state.rows[line]] then
-			vim.api.nvim_buf_set_extmark(state.buf, ns, line - 1, 1, { end_col = 4, hl_group = "PackviewMark" })
-		end
+	for _, span in ipairs(state.spans) do
+		vim.api.nvim_buf_set_extmark(state.buf, ns, span[1] - 1, span[2], {
+			end_col = span[3],
+			hl_group = span[4],
+		})
 	end
 	if cursor then
 		pcall(vim.api.nvim_win_set_cursor, state.win, { math.min(cursor[1], #lines), cursor[2] })
 	end
-end
-
-function M.detail(plugin)
-	local lines = {
-		plugin.name,
-		"",
-		"src     " .. plugin.src,
-		"commit  " .. plugin.rev:sub(1, 7),
-		"load    " .. (plugin.why ~= "" and plugin.why or "when required"),
-		"needs   " .. (#plugin.needs > 0 and table.concat(plugin.needs, ", ") or "-"),
-		"state   " .. ((plugin.loaded or plugin.active) and "loaded" or "not loaded"),
-		"path    " .. plugin.path,
-	}
-	if #plugin.log > 0 then
-		lines[#lines + 1] = ""
-		lines[#lines + 1] = plugin.ahead .. " new commits"
-		for _, line in ipairs(plugin.log) do
-			lines[#lines + 1] = "  " .. line
-		end
-	end
-	local buf = vim.api.nvim_create_buf(false, true)
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-	vim.bo[buf].filetype = "text"
-	local height = math.min(#lines + 2, math.floor(vim.o.lines * 0.6))
-	local win = vim.api.nvim_open_win(buf, true, {
-		relative = "editor",
-		width = math.floor(vim.o.columns * 0.6),
-		height = height,
-		row = math.floor((vim.o.lines - height) / 2),
-		col = math.floor(vim.o.columns * 0.2),
-		border = "rounded",
-		title = " " .. plugin.name .. " ",
-		title_pos = "center",
-	})
-	vim.keymap.set("n", "q", function()
-		if vim.api.nvim_win_is_valid(win) then
-			vim.api.nvim_win_close(win, true)
-		end
-	end, { buffer = buf })
 end
 
 return M

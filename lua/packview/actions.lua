@@ -61,9 +61,14 @@ end
 
 function M.detail()
 	local plugin = require("packview.view").current()
-	if plugin then
-		require("packview.view").detail(plugin)
+	if not plugin then
+		return
 	end
+	local url = plugin.src:gsub("%.git$", "")
+	if plugin.head and plugin.tip and plugin.head ~= plugin.tip then
+		url = url .. "/compare/" .. plugin.head:sub(1, 12) .. "..." .. plugin.tip:sub(1, 12)
+	end
+	vim.ui.open(url)
 end
 
 return M

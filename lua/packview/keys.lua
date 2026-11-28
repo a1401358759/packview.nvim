@@ -16,7 +16,7 @@ function M.bind(buf)
 	map("U", function()
 		actions.update(true)
 	end)
-	map("d", actions.delete)
+	map("x", actions.delete)
 	map("<CR>", actions.detail)
 end
 

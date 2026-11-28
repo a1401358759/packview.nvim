@@ -67,11 +67,19 @@ function M.check(plugin, fetch, done)
 						return finish()
 					end
 					git(
-						{ "log", "--no-merges", "--pretty=format:%h  %s", head .. ".." .. tip },
+						{ "log", "--no-merges", "--pretty=format:%h%x09%s%x09%cr", head .. ".." .. tip },
 						plugin.path,
 						function(ok, log)
-							plugin.log = ok and vim.split(log, "\n", { trimempty = true }) or {}
-							plugin.ahead = #plugin.log
+							plugin.commits = {}
+							if ok then
+								for line in vim.gsplit(log, "\n", { trimempty = true }) do
+									local sha, subject, when = line:match("^(.-)\t(.*)	(.*)$")
+									if sha then
+										plugin.commits[#plugin.commits + 1] = { sha = sha, subject = subject, when = when }
+									end
+								end
+							end
+							plugin.ahead = #plugin.commits
 							plugin.status = "update"
 							plugin.label = short(head) .. " → " .. (kind == "tag" and ref or short(tip))
 							finish()
