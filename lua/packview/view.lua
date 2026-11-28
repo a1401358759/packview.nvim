@@ -15,39 +15,26 @@ local state = {
 	win = nil,
 }
 
-local function byte(color, shift)
-	return math.floor(color / shift) % 256
-end
-
-local function mix(a, b, t)
-	if not a or not b then
-		return a or b
-	end
-	local function part(color, shift)
-		return math.floor(byte(color, shift) * (1 - t) + byte(b, shift) * t)
-	end
-	return part(a, 65536) * 65536 + part(a, 256) * 256 + part(a, 1)
-end
+local ink = "#222222"
 
 local function colors()
-	local normal = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
 	local comment = vim.api.nvim_get_hl(0, { name = "Comment", link = false })
 	local warn = vim.api.nvim_get_hl(0, { name = "DiagnosticWarn", link = false })
 	local ok = vim.api.nvim_get_hl(0, { name = "DiagnosticOk", link = false })
 	local info = vim.api.nvim_get_hl(0, { name = "DiagnosticInfo", link = false })
 	local error = vim.api.nvim_get_hl(0, { name = "DiagnosticError", link = false })
-	local bg = normal.bg or 0x1a1b26
-	local function badge(fg)
-		return { bg = mix(bg, fg, 0.22), fg = fg, bold = true }
+	local function chip(fg)
+		return { bg = fg, fg = ink, bold = true }
 	end
-	vim.api.nvim_set_hl(0, "PackviewUpdate", badge(warn.fg or 0xe0af68))
-	vim.api.nvim_set_hl(0, "PackviewBusy", badge(info.fg or 0x7dcfff))
-	vim.api.nvim_set_hl(0, "PackviewDone", badge(ok.fg or 0x9ece6a))
-	vim.api.nvim_set_hl(0, "PackviewFail", badge(error.fg or 0xf7768e))
-	vim.api.nvim_set_hl(0, "PackviewQueued", { bg = mix(bg, comment.fg, 0.28), fg = normal.fg or 0xc0caf5 })
-	local button_bg = mix(bg, normal.fg, 0.14)
-	vim.api.nvim_set_hl(0, "PackviewButton", { bg = button_bg, fg = normal.fg })
-	vim.api.nvim_set_hl(0, "PackviewButtonKey", { bg = button_bg, fg = info.fg or warn.fg, bold = true })
+	vim.api.nvim_set_hl(0, "PackviewHeader", chip("#DCA561"))
+	vim.api.nvim_set_hl(0, "PackviewVersion", chip("#56B6C2"))
+	vim.api.nvim_set_hl(0, "PackviewUpdate", chip(string.format("#%06x", warn.fg or 0xe0af68)))
+	vim.api.nvim_set_hl(0, "PackviewBusy", chip(string.format("#%06x", info.fg or 0x7dcfff)))
+	vim.api.nvim_set_hl(0, "PackviewDone", chip(string.format("#%06x", ok.fg or 0x9ece6a)))
+	vim.api.nvim_set_hl(0, "PackviewFail", chip(string.format("#%06x", error.fg or 0xf7768e)))
+	vim.api.nvim_set_hl(0, "PackviewQueued", { bg = "#888888", fg = ink })
+	vim.api.nvim_set_hl(0, "PackviewButton", { bg = "#888888", fg = ink })
+	vim.api.nvim_set_hl(0, "PackviewButtonKey", { bg = "#888888", fg = ink, bold = true })
 	vim.api.nvim_set_hl(0, "PackviewWhen", { fg = comment.fg, italic = true })
 end
 
@@ -88,8 +75,6 @@ local function open()
 		row = math.floor((vim.o.lines - h) / 2),
 		col = math.floor((vim.o.columns - w) / 2),
 		border = cfg.border,
-		title = " packview ",
-		title_pos = "center",
 	})
 	win_opt("number", false)
 	win_opt("relativenumber", false)
@@ -236,6 +221,15 @@ local buttons = {
 	{ "Open", "Enter" },
 }
 
+local function center(text, cols)
+	local pad = math.max(math.floor((cols - vim.api.nvim_strwidth(text)) / 2), 0)
+	return (" "):rep(pad) .. text
+end
+
+local function put(row, col, text)
+	return row:sub(1, col) .. text .. row:sub(col + #text + 1)
+end
+
 function M.draw()
 	if not (state.buf and vim.api.nvim_buf_is_valid(state.buf)) then
 		return
@@ -254,36 +248,34 @@ function M.draw()
 		return #lines
 	end
 
-	local cells = {}
-	for i = 1, cols do
-		cells[i] = " "
-	end
-	local function place(at, text)
-		for i = 1, #text do
-			local pos = at + i - 1
-			if pos >= 1 and pos <= cols then
-				cells[pos] = text:sub(i, i)
-			end
+	local name, version = " packview.nvim ", " " .. require("packview.version").VERSION .. " "
+	local title = center(name .. version, cols)
+	local head = line(title)
+	local name_at = math.floor((cols - #name - #version) / 2)
+	add(head, math.max(name_at, 0), name, "PackviewHeader")
+	add(head, math.max(name_at, 0) + #name, version, "PackviewVersion")
+
+	local url = "https://github.com/a1401358759/packview.nvim"
+	local url_row = line(center(url, cols))
+	add(url_row, math.max(math.floor((cols - #url) / 2), 0), url, "PackviewDim")
+	line("")
+
+	local bar = line((" "):rep(cols))
+	local x = 2
+	for _, button in ipairs(buttons) do
+		local text = " (" .. button[2] .. ") " .. button[1] .. " "
+		if x + #text > cols then
+			break
 		end
+		lines[bar] = put(lines[bar], x, text)
+		add(bar, x, text, "PackviewButton", 100)
+		add(bar, x + 2, button[2], "PackviewButtonKey", 110)
+		x = x + #text + 1
 	end
-	local gaps = #buttons - 1
-	local slot = math.floor((cols - gaps) / #buttons)
-	local extra = cols - (slot * #buttons + gaps)
-	local bar = line("")
-	local x = 0
-	for i, button in ipairs(buttons) do
-		local w = slot + (i == #buttons and extra or 0)
-		local text = button[1] .. "  " .. button[2]
-		local pad = math.max(math.floor((w - #text) / 2), 0)
-		place(x + pad + 1, text)
-		add(bar, x, (" "):rep(w), "PackviewButton", 100)
-		local key_at = x + pad + #button[1] + 2
-		if key_at + #button[2] <= x + w then
-			add(bar, key_at, button[2], "PackviewButtonKey", 110)
-		end
-		x = x + w + 1
-	end
-	lines[bar] = table.concat(cells)
+	lines[bar] = lines[bar] .. (" "):rep(cols - #lines[bar])
+
+	line("")
+	line("")
 
 	local updates, busy, queued = 0, 0, 0
 	for _, plugin in ipairs(state.plugins) do

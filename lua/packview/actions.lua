@@ -31,7 +31,7 @@ function M.check()
 	view.pending(left)
 
 	local function pump()
-		while active < 6 and next_i <= #plugins and gen == check_gen do
+		while active < 5 and next_i <= #plugins and gen == check_gen do
 			local plugin = plugins[next_i]
 			next_i = next_i + 1
 			active = active + 1
@@ -53,6 +53,7 @@ function M.check()
 end
 
 local updating = false
+local batch = 5
 
 function M.update(all)
 	if updating then
@@ -81,28 +82,40 @@ function M.update(all)
 	end
 
 	local function step()
-		local plugin = plugins[index]
-		if not plugin then
+		local group = vim.list_slice(plugins, index, index + batch - 1)
+		if #group == 0 then
 			finish()
 			return
 		end
-		plugin.phase = "updating"
+		for _, plugin in ipairs(group) do
+			plugin.phase = "updating"
+		end
 		view.pending(0)
 		vim.schedule(function()
 			local notify = vim.notify
 			vim.notify = function()
 				return 0
 			end
-			local ok, err = pcall(vim.pack.update, { plugin.name }, { force = true })
+			local ok, err = pcall(vim.pack.update, names(group), { force = true })
 			vim.notify = notify
-			if ok then
-				plugin.phase = "updated"
-			else
-				plugin.phase = "error"
+			if not ok then
 				vim.notify(err, vim.log.levels.ERROR)
 			end
-			index = index + 1
-			step()
+			local pending = #group
+			for _, plugin in ipairs(group) do
+				vim.system({ "git", "rev-parse", "HEAD" }, { cwd = plugin.path, text = true }, function(result)
+					local head = vim.trim(result.stdout or "")
+					local moved = not plugin.tip or head == plugin.tip
+					plugin.phase = (ok and result.code == 0 and moved) and "updated" or "error"
+					pending = pending - 1
+					if pending == 0 then
+						vim.schedule(function()
+							index = index + #group
+							step()
+						end)
+					end
+				end)
+			end
 		end)
 	end
 
