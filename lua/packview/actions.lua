@@ -15,18 +15,43 @@ local function run(fn)
 	end
 end
 
+local checking = false
+
 function M.check()
+	if checking then
+		return
+	end
+	checking = true
 	local view = require("packview.view")
 	local git = require("packview.git")
 	local plugins = view.plugins()
 	local left = #plugins
+	local next_i = 1
+	local active = 0
 	view.pending(left)
-	for _, plugin in ipairs(plugins) do
-		git.check(plugin, true, function()
-			left = left - 1
-			view.pending(left)
-		end)
+
+	local function pump()
+		while active < 6 and next_i <= #plugins do
+			local plugin = plugins[next_i]
+			next_i = next_i + 1
+			active = active + 1
+			git.check(plugin, true, function()
+				active = active - 1
+				left = left - 1
+				view.pending(left)
+				if left == 0 then
+					checking = false
+				end
+				pump()
+			end)
+		end
 	end
+
+	if #plugins == 0 then
+		checking = false
+		return
+	end
+	pump()
 end
 
 function M.update(all)

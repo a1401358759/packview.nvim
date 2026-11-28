@@ -9,6 +9,7 @@ function M.open()
 		return vim.notify("packview needs Neovim 0.12 (vim.pack)", vim.log.levels.ERROR)
 	end
 	require("packview.view").show(require("packview.state").list())
+	require("packview.actions").check()
 end
 
 return M
