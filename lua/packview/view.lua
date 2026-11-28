@@ -275,7 +275,6 @@ function M.draw()
 	lines[bar] = lines[bar] .. (" "):rep(cols - #lines[bar])
 
 	line("")
-	line("")
 
 	local updates, busy, queued = 0, 0, 0
 	for _, plugin in ipairs(state.plugins) do
