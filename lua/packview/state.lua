@@ -26,6 +26,7 @@ function M.list()
 			why = row.why or "",
 			needs = row.needs or {},
 			status = "idle",
+			phase = nil,
 			ahead = 0,
 			commits = {},
 			label = "",

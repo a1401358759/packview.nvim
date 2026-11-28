@@ -28,8 +28,8 @@ lazy.nvim:
 | `u` | Update marked rows, or the row under the cursor |
 | `U` | Update every row that has new commits |
 | `r` | Fetch and check for updates |
-| `d` | Delete marked rows, after confirmation |
-| `<CR>` | Show the source, commit, and new commits |
+| `x` | Delete marked rows, after confirmation |
+| `<CR>` | Open the source, or the compare page when it is behind |
 | `q` | Close |
 
 `<leader>ps` opens the list and `<leader>pU` updates every plugin. Both are set when the plugin loads.

@@ -1,4 +1,5 @@
--- One floating window. The bar is a row of buttons; updates sit under their plugin.
+-- The list reads as a status board. A plugin's state is a badge on its row,
+-- so an update in progress is visible without leaving the window.
 
 local M = {}
 
@@ -18,24 +19,35 @@ local function byte(color, shift)
 	return math.floor(color / shift) % 256
 end
 
--- A button needs its own background. Link a group and the background is lost.
+local function mix(a, b, t)
+	if not a or not b then
+		return a or b
+	end
+	local function part(color, shift)
+		return math.floor(byte(color, shift) * (1 - t) + byte(b, shift) * t)
+	end
+	return part(a, 65536) * 65536 + part(a, 256) * 256 + part(a, 1)
+end
+
 local function colors()
 	local normal = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
-	local cursor = vim.api.nvim_get_hl(0, { name = "CursorLine", link = false })
-	local info = vim.api.nvim_get_hl(0, { name = "DiagnosticInfo", link = false })
-	local hint = vim.api.nvim_get_hl(0, { name = "DiagnosticHint", link = false })
 	local comment = vim.api.nvim_get_hl(0, { name = "Comment", link = false })
-	local bg = normal.bg or cursor.bg or 0x24283b
-	local r, g, b = byte(bg, 65536), byte(bg, 256), byte(bg, 1)
-	local light = (r + g + b) / 3 > 140
-	local function step(c)
-		return light and math.max(0, c - 24) or math.min(255, c + 28)
+	local warn = vim.api.nvim_get_hl(0, { name = "DiagnosticWarn", link = false })
+	local ok = vim.api.nvim_get_hl(0, { name = "DiagnosticOk", link = false })
+	local info = vim.api.nvim_get_hl(0, { name = "DiagnosticInfo", link = false })
+	local error = vim.api.nvim_get_hl(0, { name = "DiagnosticError", link = false })
+	local bg = normal.bg or 0x1a1b26
+	local function badge(fg)
+		return { bg = mix(bg, fg, 0.22), fg = fg, bold = true }
 	end
-	local pill = step(r) * 65536 + step(g) * 256 + step(b)
-	local accent = info.fg or hint.fg or normal.fg
-	vim.api.nvim_set_hl(0, "PackviewButton", { bg = pill, fg = normal.fg })
-	vim.api.nvim_set_hl(0, "PackviewButtonKey", { bg = pill, fg = accent })
-	vim.api.nvim_set_hl(0, "PackviewBadge", { bg = pill, fg = accent, bold = true })
+	vim.api.nvim_set_hl(0, "PackviewUpdate", badge(warn.fg or 0xe0af68))
+	vim.api.nvim_set_hl(0, "PackviewBusy", badge(info.fg or 0x7dcfff))
+	vim.api.nvim_set_hl(0, "PackviewDone", badge(ok.fg or 0x9ece6a))
+	vim.api.nvim_set_hl(0, "PackviewFail", badge(error.fg or 0xf7768e))
+	vim.api.nvim_set_hl(0, "PackviewQueued", { bg = mix(bg, comment.fg, 0.28), fg = normal.fg or 0xc0caf5 })
+	local button_bg = mix(bg, normal.fg, 0.14)
+	vim.api.nvim_set_hl(0, "PackviewButton", { bg = button_bg, fg = normal.fg })
+	vim.api.nvim_set_hl(0, "PackviewButtonKey", { bg = button_bg, fg = info.fg or warn.fg, bold = true })
 	vim.api.nvim_set_hl(0, "PackviewWhen", { fg = comment.fg, italic = true })
 end
 
@@ -46,7 +58,7 @@ end
 link("PackviewTitle", "Title")
 link("PackviewDim", "Comment")
 link("PackviewName", "Normal")
-link("PackviewLoaded", "DiagnosticOk")
+link("PackviewDot", "DiagnosticOk")
 link("PackviewReason", "Constant")
 link("PackviewHash", "Identifier")
 link("PackviewType", "Function")
@@ -55,6 +67,10 @@ link("PackviewMark", "Special")
 
 local function width()
 	return vim.api.nvim_win_get_width(state.win)
+end
+
+local function win_opt(name, value)
+	vim.api.nvim_set_option_value(name, value, { win = state.win })
 end
 
 local function open()
@@ -75,9 +91,6 @@ local function open()
 		title = " packview ",
 		title_pos = "center",
 	})
-	local function win_opt(name, value)
-		vim.api.nvim_set_option_value(name, value, { win = state.win })
-	end
 	win_opt("number", false)
 	win_opt("relativenumber", false)
 	win_opt("signcolumn", "no")
@@ -139,26 +152,63 @@ function M.close()
 	state.win, state.buf = nil, nil
 end
 
-local function add(line, col, text, group)
-	state.spans[#state.spans + 1] = { line, col, col + #text, group }
+local function add(line, col, text, group, priority)
+	state.spans[#state.spans + 1] = { line, col, col + #text, group, priority }
 end
 
-local function groups()
-	local updates, loaded, waiting = {}, {}, {}
-	for index, plugin in ipairs(state.plugins) do
-		if plugin.status == "update" then
-			updates[#updates + 1] = index
-		elseif plugin.loaded or plugin.active then
-			loaded[#loaded + 1] = index
-		else
-			waiting[#waiting + 1] = index
-		end
+local badge = {
+	updating = { " updating ", "PackviewBusy" },
+	queued = { " queued ", "PackviewQueued" },
+	updated = { " updated ", "PackviewDone" },
+	update = { " updates available ", "PackviewUpdate" },
+	checking = { " checking ", "PackviewBusy" },
+	error = { " failed ", "PackviewFail" },
+}
+
+local titles = { "Updating", "Queued", "Updates", "Failed", "Updated", "Loaded", "Not loaded" }
+
+local function rank(plugin)
+	if plugin.phase == "updating" then
+		return 1
 	end
-	return {
-		{ "Log", updates },
-		{ "Loaded", loaded },
-		{ "Not loaded", waiting },
-	}
+	if plugin.phase == "queued" then
+		return 2
+	end
+	if plugin.status == "update" then
+		return 3
+	end
+	if plugin.phase == "error" then
+		return 4
+	end
+	if plugin.phase == "updated" then
+		return 5
+	end
+	if plugin.loaded or plugin.active then
+		return 6
+	end
+	return 7
+end
+
+local function sections()
+	local order = {}
+	for index in ipairs(state.plugins) do
+		order[#order + 1] = index
+	end
+	table.sort(order, function(a, b)
+		local ra, rb = rank(state.plugins[a]), rank(state.plugins[b])
+		return ra == rb and a < b or ra < rb
+	end)
+	local result, current = {}, nil
+	for _, index in ipairs(order) do
+		local title = titles[rank(state.plugins[index])]
+		if title ~= current then
+			current = title
+			result[#result + 1] = { title, {} }
+		end
+		local bucket = result[#result][2]
+		bucket[#bucket + 1] = index
+	end
+	return result
 end
 
 local function reason(plugin)
@@ -178,7 +228,7 @@ local function kind_of(subject)
 	end
 end
 
-local actions = {
+local buttons = {
 	{ "Update", "u" },
 	{ "All", "U" },
 	{ "Check", "r" },
@@ -191,7 +241,10 @@ function M.draw()
 		return
 	end
 	colors()
-	local cursor = state.win and vim.api.nvim_win_is_valid(state.win) and vim.api.nvim_win_get_cursor(state.win)
+	local follow = nil
+	if state.win and vim.api.nvim_win_is_valid(state.win) then
+		follow = state.rows[vim.api.nvim_win_get_cursor(state.win)[1]]
+	end
 	local cols = width()
 	local lines = {}
 	state.rows, state.spans = {}, {}
@@ -201,8 +254,6 @@ function M.draw()
 		return #lines
 	end
 
-	-- One slot per button, the label centered in it, so the row fills the window.
-	local slot = math.floor(cols / #actions)
 	local cells = {}
 	for i = 1, cols do
 		cells[i] = " "
@@ -215,88 +266,110 @@ function M.draw()
 			end
 		end
 	end
+	local gaps = #buttons - 1
+	local slot = math.floor((cols - gaps) / #buttons)
+	local extra = cols - (slot * #buttons + gaps)
 	local bar = line("")
-	for i, action in ipairs(actions) do
-		local label = " " .. action[1] .. " (" .. action[2] .. ") "
-		local at = (i - 1) * slot + math.max(math.floor((slot - #label) / 2), 0) + 1
-		place(at, label)
-		add(bar, at - 1, label, "PackviewButton")
-		add(bar, at + #action[1] + 1, "(" .. action[2] .. ")", "PackviewButtonKey")
+	local x = 0
+	for i, button in ipairs(buttons) do
+		local w = slot + (i == #buttons and extra or 0)
+		local text = button[1] .. "  " .. button[2]
+		local pad = math.max(math.floor((w - #text) / 2), 0)
+		place(x + pad + 1, text)
+		add(bar, x, (" "):rep(w), "PackviewButton", 100)
+		local key_at = x + pad + #button[1] + 2
+		if key_at + #button[2] <= x + w then
+			add(bar, key_at, button[2], "PackviewButtonKey", 110)
+		end
+		x = x + w + 1
 	end
 	lines[bar] = table.concat(cells)
 
-	local updates = 0
+	local updates, busy, queued = 0, 0, 0
 	for _, plugin in ipairs(state.plugins) do
 		if plugin.status == "update" then
 			updates = updates + 1
 		end
+		if plugin.phase == "updating" then
+			busy = busy + 1
+		elseif plugin.phase == "queued" then
+			queued = queued + 1
+		end
 	end
-	local summary = ("  Total: %d plugins"):format(#state.plugins)
-	if state.pending > 0 then
+	local summary = ("  %d plugins"):format(#state.plugins)
+	if busy > 0 or queued > 0 then
+		summary = summary .. ("    %d updating"):format(busy)
+		if queued > 0 then
+			summary = summary .. ("    %d queued"):format(queued)
+		end
+	elseif state.pending > 0 then
 		summary = summary .. ("    checking %d"):format(state.pending)
+	elseif updates > 0 then
+		summary = summary .. ("    %d updates"):format(updates)
 	end
 	local row = line(summary)
 	add(row, 2, summary:sub(3), "PackviewTitle")
 	line("")
 
-	for _, group in ipairs(groups()) do
-		local title, indexes = group[1], group[2]
-		if #indexes > 0 then
-			local heading = ("  %s  (%d)"):format(title, #indexes)
-			local grow = line(heading)
-			add(grow, 2, title, "PackviewTitle")
-			add(grow, 2 + #title + 2, "(" .. #indexes .. ")", "PackviewDim")
+	for _, section in ipairs(sections()) do
+		local title, indexes = section[1], section[2]
+		local heading = ("  %s  (%d)"):format(title, #indexes)
+		local grow = line(heading)
+		add(grow, 2, title, "PackviewTitle")
+		add(grow, 2 + #title + 2, "(" .. #indexes .. ")", "PackviewDim")
 
-			for _, index in ipairs(indexes) do
-				local plugin = state.plugins[index]
-				local dot = (plugin.loaded or plugin.active) and "\226\151\143" or "\226\151\139"
-				local mark = state.marked[index] and "\226\150\184 " or "  "
-				local why = reason(plugin)
-				local badge = plugin.status == "update" and " updates available " or ""
-				local prefix = mark .. dot .. " "
-				local left = prefix .. plugin.name .. (why ~= "" and ("  " .. why) or "")
-				local gap = cols - vim.api.nvim_strwidth(left) - vim.api.nvim_strwidth(badge) - 2
-				local text = left .. (" "):rep(math.max(gap, 2)) .. badge
-				local prow = line(text)
-				state.rows[prow] = index
-				add(prow, #mark, dot, (plugin.loaded or plugin.active) and "PackviewLoaded" or "PackviewDim")
-				local at = #prefix
-				add(prow, at, plugin.name, "PackviewName")
-				if why ~= "" then
-					add(prow, at + #plugin.name + 2, why, "PackviewReason")
-				end
-				if badge ~= "" then
-					add(prow, #text - #badge, badge, "PackviewBadge")
-				end
-
-				for i, commit in ipairs(plugin.commits or {}) do
-					if i > 4 then
-						break
-					end
-					local indent = (" "):rep(vim.api.nvim_strwidth(prefix) + 2)
-					local kind, rest = kind_of(commit.subject)
-					local body = kind and (kind .. ": " .. rest) or commit.subject
-					local when = "(" .. commit.when .. ")"
-					local commit_line = indent .. commit.sha .. "  " .. body .. "  " .. when
-					local crow = line(commit_line)
-					state.rows[crow] = index
-					local cat = #indent
-					add(crow, cat, commit.sha, "PackviewHash")
-					cat = cat + #commit.sha + 2
-					if kind then
-						add(crow, cat, kind, "PackviewType")
-						cat = cat + #kind
-						add(crow, cat, ": " .. rest, "PackviewSubject")
-						cat = cat + 2 + #rest + 2
-					else
-						add(crow, cat, commit.subject, "PackviewSubject")
-						cat = cat + #commit.subject + 2
-					end
-					add(crow, cat, when, "PackviewWhen")
-				end
+		for _, index in ipairs(indexes) do
+			local plugin = state.plugins[index]
+			local dot = (plugin.loaded or plugin.active) and "\226\151\143" or "\226\151\139"
+			local mark = state.marked[index] and "\226\150\184" or " "
+			local why = reason(plugin)
+			local chip = badge[plugin.phase] or badge[plugin.status]
+			local chip_text = chip and chip[1] or ""
+			local prefix = " " .. mark .. " " .. dot .. " "
+			local body = plugin.name .. (why ~= "" and ("   " .. why) or "")
+			local left = prefix .. body
+			local gap = cols - vim.api.nvim_strwidth(left) - vim.api.nvim_strwidth(chip_text) - 2
+			local text = left .. (" "):rep(math.max(gap, 2)) .. chip_text
+			local prow = line(text)
+			state.rows[prow] = index
+			if state.marked[index] then
+				add(prow, 1, mark, "PackviewMark")
 			end
-			line("")
+			add(prow, 3, dot, (plugin.loaded or plugin.active) and "PackviewDot" or "PackviewDim")
+			add(prow, #prefix, plugin.name, "PackviewName")
+			if why ~= "" then
+				add(prow, #prefix + #plugin.name + 3, why, "PackviewReason")
+			end
+			if chip then
+				add(prow, #text - #chip_text, chip_text, chip[2])
+			end
+
+			for i, commit in ipairs(plugin.commits or {}) do
+				if i > 4 then
+					break
+				end
+				local indent = (" "):rep(vim.api.nvim_strwidth(prefix) + 2)
+				local kind, rest = kind_of(commit.subject)
+				local when = "(" .. commit.when .. ")"
+				local commit_line = indent .. commit.sha .. "  " .. (kind and (kind .. ": " .. rest) or commit.subject) .. "  " .. when
+				local crow = line(commit_line)
+				state.rows[crow] = index
+				local cat = #indent
+				add(crow, cat, commit.sha, "PackviewHash")
+				cat = cat + #commit.sha + 2
+				if kind then
+					add(crow, cat, kind, "PackviewType")
+					cat = cat + #kind
+					add(crow, cat, ": " .. rest, "PackviewSubject")
+					cat = cat + 2 + #rest + 2
+				else
+					add(crow, cat, commit.subject, "PackviewSubject")
+					cat = cat + #commit.subject + 2
+				end
+				add(crow, cat, when, "PackviewWhen")
+			end
 		end
+		line("")
 	end
 
 	vim.bo[state.buf].modifiable = true
@@ -307,10 +380,27 @@ function M.draw()
 		pcall(vim.api.nvim_buf_set_extmark, state.buf, ns, span[1] - 1, span[2], {
 			end_col = math.min(span[3], #lines[span[1]]),
 			hl_group = span[4],
+			priority = span[5],
 		})
 	end
-	if cursor then
-		pcall(vim.api.nvim_win_set_cursor, state.win, { math.min(cursor[1], #lines), 0 })
+	local target = nil
+	if follow then
+		for i, index in pairs(state.rows) do
+			if index == follow and (not target or i < target) then
+				target = i
+			end
+		end
+	end
+	if not target then
+		for i = 1, #lines do
+			if state.rows[i] then
+				target = i
+				break
+			end
+		end
+	end
+	if target then
+		pcall(vim.api.nvim_win_set_cursor, state.win, { target, 0 })
 	end
 end
 

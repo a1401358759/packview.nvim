@@ -15,13 +15,13 @@ local function run(fn)
 	end
 end
 
-local checking = false
+-- A newer check drops results from the one it replaced, so a refresh
+-- after an update cannot be stuck behind the check that was already running.
+local check_gen = 0
 
 function M.check()
-	if checking then
-		return
-	end
-	checking = true
+	check_gen = check_gen + 1
+	local gen = check_gen
 	local view = require("packview.view")
 	local git = require("packview.git")
 	local plugins = view.plugins()
@@ -31,30 +31,33 @@ function M.check()
 	view.pending(left)
 
 	local function pump()
-		while active < 6 and next_i <= #plugins do
+		while active < 6 and next_i <= #plugins and gen == check_gen do
 			local plugin = plugins[next_i]
 			next_i = next_i + 1
 			active = active + 1
 			git.check(plugin, true, function()
+				if gen ~= check_gen then
+					return
+				end
 				active = active - 1
 				left = left - 1
 				view.pending(left)
-				if left == 0 then
-					checking = false
-				end
 				pump()
 			end)
 		end
 	end
 
-	if #plugins == 0 then
-		checking = false
-		return
+	if #plugins > 0 then
+		pump()
 	end
-	pump()
 end
 
+local updating = false
+
 function M.update(all)
+	if updating then
+		return
+	end
 	local view = require("packview.view")
 	local plugins = all and vim.tbl_filter(function(plugin)
 		return plugin.status == "update"
@@ -62,10 +65,48 @@ function M.update(all)
 	if #plugins == 0 then
 		return
 	end
-	run(function()
-		vim.pack.update(names(plugins), { force = true })
-	end)
-	M.check()
+	updating = true
+	for _, plugin in ipairs(plugins) do
+		plugin.phase = "queued"
+	end
+	local index = 1
+
+	local function finish()
+		updating = false
+		view.pending(0)
+		vim.schedule(function()
+			view.show(require("packview.state").list())
+			M.check()
+		end)
+	end
+
+	local function step()
+		local plugin = plugins[index]
+		if not plugin then
+			finish()
+			return
+		end
+		plugin.phase = "updating"
+		view.pending(0)
+		vim.schedule(function()
+			local notify = vim.notify
+			vim.notify = function()
+				return 0
+			end
+			local ok, err = pcall(vim.pack.update, { plugin.name }, { force = true })
+			vim.notify = notify
+			if ok then
+				plugin.phase = "updated"
+			else
+				plugin.phase = "error"
+				vim.notify(err, vim.log.levels.ERROR)
+			end
+			index = index + 1
+			step()
+		end)
+	end
+
+	step()
 end
 
 function M.delete()
