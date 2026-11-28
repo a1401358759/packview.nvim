@@ -36,6 +36,9 @@ local function colors()
 	vim.api.nvim_set_hl(0, "PackviewButton", { bg = "#888888", fg = ink })
 	vim.api.nvim_set_hl(0, "PackviewButtonKey", { bg = "#888888", fg = ink, bold = true })
 	vim.api.nvim_set_hl(0, "PackviewWhen", { fg = comment.fg, italic = true })
+	local info_fg = info.fg and string.format("#%06x", info.fg) or "#7dcfff"
+	vim.api.nvim_set_hl(0, "PackviewStat", { fg = info_fg, bold = true })
+	vim.api.nvim_set_hl(0, "PackviewCount", { bold = true })
 end
 
 local function link(name, to)
@@ -98,9 +101,40 @@ function M.plugins()
 	return state.plugins
 end
 
+local redraw_timer
+
+local function stop_redraw()
+	if redraw_timer then
+		redraw_timer:stop()
+		redraw_timer:close()
+		redraw_timer = nil
+	end
+end
+
+-- Checking finishes in bursts. Redrawing the whole list for each one keeps the
+-- next fetch from starting, so the counter refreshes on a short timer instead.
 function M.pending(n)
 	state.pending = n
-	M.draw()
+	if n == 0 then
+		stop_redraw()
+		M.draw()
+		return
+	end
+	if redraw_timer then
+		return
+	end
+	redraw_timer = vim.uv.new_timer()
+	redraw_timer:start(
+		60,
+		0,
+		vim.schedule_wrap(function()
+			if not redraw_timer then
+				return
+			end
+			stop_redraw()
+			M.draw()
+		end)
+	)
 end
 
 function M.current()
@@ -287,19 +321,37 @@ function M.draw()
 			queued = queued + 1
 		end
 	end
-	local summary = ("  %d plugins"):format(#state.plugins)
+	local chunks = {}
+	local function chunk(text, group)
+		chunks[#chunks + 1] = { text, group }
+	end
+	chunk("  Total: ", "PackviewTitle")
+	chunk(tostring(#state.plugins), "PackviewCount")
+	chunk(" plugins", "PackviewDim")
 	if busy > 0 or queued > 0 then
-		summary = summary .. ("    %d updating"):format(busy)
+		chunk("    Updating: ", "PackviewStat")
+		chunk(tostring(busy), "PackviewCount")
 		if queued > 0 then
-			summary = summary .. ("    %d queued"):format(queued)
+			chunk("    Queued: ", "PackviewDim")
+			chunk(tostring(queued), "PackviewCount")
 		end
 	elseif state.pending > 0 then
-		summary = summary .. ("    checking %d"):format(state.pending)
+		chunk("    Checking: ", "PackviewStat")
+		chunk(tostring(state.pending), "PackviewCount")
 	elseif updates > 0 then
-		summary = summary .. ("    %d updates"):format(updates)
+		chunk("    Updates: ", "PackviewStat")
+		chunk(tostring(updates), "PackviewCount")
 	end
-	local row = line(summary)
-	add(row, 2, summary:sub(3), "PackviewTitle")
+	local summary = ""
+	for _, part in ipairs(chunks) do
+		summary = summary .. part[1]
+	end
+	local row = line(summary .. (" "):rep(math.max(cols - #summary, 0)))
+	local at = 0
+	for _, part in ipairs(chunks) do
+		add(row, at, part[1], part[2])
+		at = at + #part[1]
+	end
 	line("")
 
 	for _, section in ipairs(sections()) do

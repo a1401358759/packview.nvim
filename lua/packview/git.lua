@@ -12,30 +12,94 @@ local function short(sha)
 	return sha ~= "" and sha:sub(1, 7) or ""
 end
 
--- The ref vim.pack would check out: default branch, a branch, a tag or commit,
--- or the newest tag inside a version range.
-local function target(plugin, cb)
+local function two(out)
+	return out:match("^(%x+)\n(%x+)$")
+end
+
+local function log(plugin, head, tip, kind, ref, finish)
+	plugin.head, plugin.tip = head, tip
+	if head == tip then
+		plugin.status = "ok"
+		plugin.ahead = 0
+		plugin.commits = {}
+		plugin.label = kind == "tag" and ref or short(head)
+		return finish()
+	end
+	git(
+		{ "log", "--no-merges", "--max-count=4", "--pretty=format:%h%x09%s%x09%cr", head .. ".." .. tip },
+		plugin.path,
+		function(ok, text)
+			plugin.commits = {}
+			if ok then
+				for line in vim.gsplit(text, "\n", { trimempty = true }) do
+					local sha, subject, when = line:match("^(.-)\t(.*)\t(.*)$")
+					if sha then
+						plugin.commits[#plugin.commits + 1] = { sha = sha, subject = subject, when = when }
+					end
+				end
+			end
+			plugin.ahead = #plugin.commits
+			plugin.status = "update"
+			plugin.label = short(head) .. " \xe2\x86\x92 " .. (kind == "tag" and ref or short(tip))
+			finish()
+		end
+	)
+end
+
+-- One rev-parse for HEAD and the ref vim.pack would check out. Tags are only
+-- needed for a version range; everything else tracks a branch or a commit.
+local function compare(plugin, finish)
 	local version = plugin.version
 	if version == nil then
-		git({ "rev-parse", "--abbrev-ref", "origin/HEAD" }, plugin.path, function(ok, out)
-			cb(ok and out ~= "" and out or nil, "branch")
+		git({ "rev-parse", "--verify", "HEAD", "origin/HEAD" }, plugin.path, function(ok, out)
+			local head, tip = ok and two(out) or nil
+			if not head then
+				plugin.status = "unknown"
+				return finish()
+			end
+			log(plugin, head, tip, "branch", nil, finish)
 		end)
 	elseif type(version) == "string" then
-		git({ "branch", "--remote", "--list", "origin/" .. version }, plugin.path, function(ok, out)
-			cb(ok and out ~= "" and ("origin/" .. version) or version, ok and out ~= "" and "branch" or "commit")
+		git({ "rev-parse", "--verify", "HEAD", "origin/" .. version }, plugin.path, function(ok, out)
+			local head, tip = ok and two(out) or nil
+			if head then
+				return log(plugin, head, tip, "branch", version, finish)
+			end
+			git({ "rev-parse", "--verify", "HEAD", version }, plugin.path, function(ok_commit, commit_out)
+				local head_commit, tip_commit = ok_commit and two(commit_out) or nil
+				if not head_commit then
+					plugin.status = "unknown"
+					return finish()
+				end
+				log(plugin, head_commit, tip_commit, "commit", version, finish)
+			end)
 		end)
 	else
 		git({ "tag", "--list", "--sort=-v:refname" }, plugin.path, function(ok, out)
 			if not ok then
-				return cb(nil)
+				plugin.status = "unknown"
+				return finish()
 			end
-			for tag in vim.gsplit(out, "\n", { trimempty = true }) do
-				local parsed = vim.version.parse(tag)
+			local tag
+			for name in vim.gsplit(out, "\n", { trimempty = true }) do
+				local parsed = vim.version.parse(name)
 				if parsed and version:has(parsed) then
-					return cb(tag, "tag")
+					tag = name
+					break
 				end
 			end
-			cb(nil)
+			if not tag then
+				plugin.status = "unknown"
+				return finish()
+			end
+			git({ "rev-parse", "--verify", "HEAD", tag }, plugin.path, function(ok_tag, tag_out)
+				local head, tip = ok_tag and two(tag_out) or nil
+				if not head then
+					plugin.status = "error"
+					return finish()
+				end
+				log(plugin, head, tip, "tag", tag, finish)
+			end)
 		end)
 	end
 end
@@ -48,53 +112,16 @@ function M.check(plugin, fetch, done)
 		vim.schedule(done)
 	end
 
-	local function compare()
-		target(plugin, function(ref, kind)
-			if not ref then
-				plugin.status = "unknown"
-				return finish()
-			end
-			git({ "rev-parse", "HEAD" }, plugin.path, function(ok_head, head)
-				git({ "rev-list", "-1", ref }, plugin.path, function(ok_ref, tip)
-					if not (ok_head and ok_ref) or head == "" or tip == "" then
-						plugin.status = "error"
-						return finish()
-					end
-					plugin.head, plugin.tip = head, tip
-					if head == tip then
-						plugin.status = "ok"
-						plugin.label = kind == "tag" and ref or short(head)
-						return finish()
-					end
-					git(
-						{ "log", "--no-merges", "--pretty=format:%h%x09%s%x09%cr", head .. ".." .. tip },
-						plugin.path,
-						function(ok, log)
-							plugin.commits = {}
-							if ok then
-								for line in vim.gsplit(log, "\n", { trimempty = true }) do
-									local sha, subject, when = line:match("^(.-)\t(.*)	(.*)$")
-									if sha then
-										plugin.commits[#plugin.commits + 1] = { sha = sha, subject = subject, when = when }
-									end
-								end
-							end
-							plugin.ahead = #plugin.commits
-							plugin.status = "update"
-							plugin.label = short(head) .. " → " .. (kind == "tag" and ref or short(tip))
-							finish()
-						end
-					)
-				end)
-			end)
-		end)
+	if not fetch then
+		return compare(plugin, finish)
 	end
-
-	if fetch then
-		git({ "fetch", "--quiet", "--tags", "--force", "origin" }, plugin.path, compare)
-	else
-		compare()
+	local args = { "fetch", "--quiet", "--prune", "--no-tags", "origin" }
+	if plugin.version ~= nil and type(plugin.version) ~= "string" then
+		args = { "fetch", "--quiet", "--prune", "--tags", "origin" }
 	end
+	git(args, plugin.path, function()
+		compare(plugin, finish)
+	end)
 end
 
 return M

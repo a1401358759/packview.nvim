@@ -31,7 +31,7 @@ function M.check()
 	view.pending(left)
 
 	local function pump()
-		while active < 5 and next_i <= #plugins and gen == check_gen do
+		while active < 16 and next_i <= #plugins and gen == check_gen do
 			local plugin = plugins[next_i]
 			next_i = next_i + 1
 			active = active + 1
