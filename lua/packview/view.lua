@@ -75,15 +75,17 @@ local function open()
 		title = " packview ",
 		title_pos = "center",
 	})
-	local wo = vim.wo[state.win]
-	wo.number = false
-	wo.relativenumber = false
-	wo.signcolumn = "no"
-	wo.statuscolumn = ""
-	wo.foldcolumn = "0"
-	wo.cursorline = true
-	wo.wrap = false
-	wo.list = false
+	local function win_opt(name, value)
+		vim.api.nvim_set_option_value(name, value, { win = state.win })
+	end
+	win_opt("number", false)
+	win_opt("relativenumber", false)
+	win_opt("signcolumn", "no")
+	win_opt("statuscolumn", "")
+	win_opt("foldcolumn", "0")
+	win_opt("cursorline", true)
+	win_opt("wrap", false)
+	win_opt("list", false)
 	vim.bo[state.buf].filetype = "packview"
 	require("packview.keys").bind(state.buf)
 end
